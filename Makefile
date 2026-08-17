@@ -55,6 +55,7 @@ BPF2GO_ARGS := -go-package ebpfloader \
                -output-dir $(GEN_DIR) \
                -target amd64,arm64 \
                -type event \
+               -type config \
                -cc clang \
                -cflags "$(BPF_CFLAGS)"
 
@@ -70,7 +71,10 @@ all: generate build test ## Generate, build and test
 .PHONY: generate
 generate: $(GEN_STAMP) ## Compile the eBPF C and generate Go bindings
 
-$(GEN_STAMP): $(BPF_SRC) $(BPF_HDRS)
+# Depends on the Makefile itself as well as the sources: changing the bpf2go
+# flags must force a regenerate, or the stale bindings look valid and confuse
+# the next person for an afternoon.
+$(GEN_STAMP): $(BPF_SRC) $(BPF_HDRS) $(MAKEFILE_LIST)
 	@command -v clang >/dev/null 2>&1 || { \
 		echo "error: clang not found. eBPF cannot be compiled without it."; \
 		echo "       On macOS/Windows use the Linux dev container: make docker-shell"; \

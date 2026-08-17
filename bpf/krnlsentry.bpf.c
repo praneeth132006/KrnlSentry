@@ -140,6 +140,32 @@ struct {
  */
 const struct event *unused_event_type_anchor __attribute__((unused));
 
+/*
+ * Drop accounting.
+ *
+ * Per-CPU rather than a shared array so the increment needs no atomic and no
+ * cache-line ping-pong between cores — this runs on every traced syscall on
+ * every CPU, so a contended counter would be a genuine throughput problem.
+ * User space sums the per-CPU values when it reports.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, KS_STAT_MAX);
+	__type(key, __u32);
+	__type(value, __u64);
+} stats_map SEC(".maps");
+
+static __always_inline void stat_inc(__u32 slot)
+{
+	__u64 *count = bpf_map_lookup_elem(&stats_map, &slot);
+
+	/* Plain increment, not __sync_fetch_and_add: the map is per-CPU and
+	 * tracepoint handlers run with preemption disabled, so this CPU's slot
+	 * cannot be touched concurrently. */
+	if (count)
+		*count += 1;
+}
+
 /* Minimal sockaddr shapes for parsing connect()'s second argument out of user
  * memory. We define our own rather than using CO-RE on the kernel's sockaddr,
  * because this memory belongs to the traced process and follows the stable
@@ -257,11 +283,11 @@ static __always_inline void fill_common(struct event *e, __u32 syscall_id)
  * Reserve and pre-fill an event, or return NULL if we should not emit one.
  *
  * NULL happens in two cases, and the difference matters operationally:
- *   - should_skip() said so (our own process) — expected, not an error.
- *   - the ring buffer is full — user space is not draining fast enough and we
- *     are dropping events. There is no way to signal that from here without a
- *     counter map; the userspace reader detects it instead via the ring
- *     buffer's own dropped-sample accounting.
+ *   - should_skip() said so (our own process) — expected, not an error, and
+ *     not counted as a drop.
+ *   - the ring buffer is full — user space is not draining fast enough and the
+ *     event is genuinely lost. That increments KS_STAT_DROPPED so the agent can
+ *     report it instead of silently under-reporting.
  */
 static __always_inline struct event *event_begin(__u32 syscall_id)
 {
@@ -273,13 +299,24 @@ static __always_inline struct event *event_begin(__u32 syscall_id)
 
 	struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
 
-	if (!e)
+	if (!e) {
+		stat_inc(KS_STAT_DROPPED);
 		return NULL;
+	}
 
 	zero_variable_fields(e);
 	fill_common(e, syscall_id);
 
 	return e;
+}
+
+/* Commit a reserved event and count it. Always pair with event_begin(): a
+ * reserved-but-unsubmitted event pins ring buffer space until the program
+ * exits, so there is no path out of a probe that skips this. */
+static __always_inline void event_submit(struct event *e)
+{
+	stat_inc(KS_STAT_EVENTS);
+	bpf_ringbuf_submit(e, 0);
 }
 
 /*
@@ -410,7 +447,7 @@ int trace_execve(struct trace_event_raw_sys_enter *ctx)
 	read_user_path(e, (const void *)ctx->args[0]);
 	read_user_argv(e, (const void *)ctx->args[1]);
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -438,7 +475,7 @@ int trace_execveat(struct trace_event_raw_sys_enter *ctx)
 	read_user_path(e, (const void *)ctx->args[1]);
 	read_user_argv(e, (const void *)ctx->args[2]);
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -475,7 +512,7 @@ int trace_openat(struct trace_event_raw_sys_enter *ctx)
 
 	read_user_path(e, (const void *)ctx->args[1]);
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -503,7 +540,7 @@ int trace_setuid(struct trace_event_raw_sys_enter *ctx)
 
 	e->arg0 = (__s64)ctx->args[0]; /* target uid */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -517,7 +554,7 @@ int trace_setgid(struct trace_event_raw_sys_enter *ctx)
 
 	e->arg0 = (__s64)ctx->args[0]; /* target gid */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -545,7 +582,7 @@ int trace_setresuid(struct trace_event_raw_sys_enter *ctx)
 	e->arg1 = (__s64)(__s32)ctx->args[1]; /* euid */
 	e->arg2 = (__s64)(__s32)ctx->args[2]; /* suid */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -561,7 +598,7 @@ int trace_setresgid(struct trace_event_raw_sys_enter *ctx)
 	e->arg1 = (__s64)(__s32)ctx->args[1]; /* egid */
 	e->arg2 = (__s64)(__s32)ctx->args[2]; /* sgid */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -587,7 +624,7 @@ int trace_capset(struct trace_event_raw_sys_enter *ctx)
 	if (!e)
 		return 0;
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -618,7 +655,7 @@ int trace_ptrace(struct trace_event_raw_sys_enter *ctx)
 	e->arg1 = (__s64)ctx->args[1]; /* target pid */
 	e->arg2 = (__s64)ctx->args[2]; /* addr */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -656,7 +693,7 @@ int trace_socket(struct trace_event_raw_sys_enter *ctx)
 	e->arg2 = (__s64)ctx->args[2]; /* protocol */
 	e->family = (__u16)ctx->args[0];
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -675,7 +712,7 @@ int trace_socket_exit(struct trace_event_raw_sys_exit *ctx)
 	e->flags |= KS_FLAG_SYS_EXIT;
 	e->ret = ctx->ret;
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -699,7 +736,7 @@ int trace_connect(struct trace_event_raw_sys_enter *ctx)
 
 	read_sockaddr(e, (const void *)ctx->args[1]);
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -719,7 +756,7 @@ int trace_connect_exit(struct trace_event_raw_sys_exit *ctx)
 	e->flags |= KS_FLAG_SYS_EXIT;
 	e->ret = ctx->ret;
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -740,7 +777,7 @@ int trace_dup2(struct trace_event_raw_sys_enter *ctx)
 	e->arg0 = (__s64)ctx->args[0]; /* oldfd */
 	e->arg1 = (__s64)ctx->args[1]; /* newfd */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 
@@ -765,7 +802,7 @@ int trace_dup3(struct trace_event_raw_sys_enter *ctx)
 	e->arg1 = (__s64)ctx->args[1]; /* newfd */
 	e->arg2 = (__s64)ctx->args[2]; /* flags */
 
-	bpf_ringbuf_submit(e, 0);
+	event_submit(e);
 	return 0;
 }
 

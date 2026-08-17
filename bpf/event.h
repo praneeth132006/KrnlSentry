@@ -95,6 +95,21 @@ enum ks_syscall {
  */
 #define KS_FLAG_SYS_EXIT (1U << 0)
 
+/*
+ * Statistics counter slots.
+ *
+ * The ring buffer gives no indication to user space when it drops an event —
+ * bpf_ringbuf_reserve() simply returns NULL in the kernel and the reader never
+ * learns anything happened. For a security monitor that silence is
+ * unacceptable: "no alerts" and "alerts were dropped on the floor" must not
+ * look identical. These counters make the difference observable.
+ */
+enum ks_stat {
+	KS_STAT_EVENTS  = 0, /* events successfully submitted */
+	KS_STAT_DROPPED = 1, /* ring buffer full; event lost */
+	KS_STAT_MAX     = 2,
+};
+
 struct event {
 	/* Nanoseconds since boot (CLOCK_MONOTONIC). Deliberately *not* wall
 	 * clock: bpf_ktime_get_ns() is the cheap, monotonic option, and it
