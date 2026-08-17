@@ -1,0 +1,27 @@
+# Build output
+/bin/
+/dist/
+*.o
+*.so
+
+# bpf2go generates these from bpf/*.bpf.c at build time.
+# They are NOT committed: they embed a compiled ELF and would rot silently.
+/ebpfloader/krnlsentry_*.go
+/ebpfloader/krnlsentry_*.o
+
+# Runtime artifacts
+*.jsonl
+/alerts.jsonl
+/debug.jsonl
+
+# Go
+/vendor/
+*.test
+*.out
+coverage.txt
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
