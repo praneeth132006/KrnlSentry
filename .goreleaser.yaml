@@ -1,0 +1,133 @@
+# GoReleaser configuration.
+#
+# Builds release binaries for linux/amd64 and linux/arm64 — and only Linux,
+# because eBPF does not exist anywhere else. Listing darwin or windows targets
+# would produce binaries that compile and then fail at the first syscall, which
+# is worse than not shipping them.
+#
+# The important wrinkle is the `before` hook: the Go sources that embed the
+# compiled BPF object are generated, not committed, so `make generate` must run
+# before GoReleaser starts building. That means a release host needs clang and
+# libbpf, exactly like a development host.
+#
+#   Test locally:  goreleaser release --snapshot --clean
+
+version: 2
+
+project_name: krnlsentry
+
+before:
+  hooks:
+    # Regenerates ebpfloader/krnlsentry_*.go from bpf/krnlsentry.bpf.c. Both
+    # architectures are emitted in one pass and selected by build tag, so the
+    # two build targets below share this single invocation.
+    - make generate
+    - go mod tidy
+
+builds:
+  - id: krnlsentry
+    main: ./cmd/krnlsentry
+    binary: krnlsentry
+
+    env:
+      # Static binary with no libc dependency: the whole point of CO-RE is that
+      # the artifact runs on any 5.8+ kernel without installing anything.
+      - CGO_ENABLED=0
+
+    goos:
+      - linux
+
+    goarch:
+      - amd64
+      - arm64
+
+    flags:
+      # Strip local paths from the binary so builds are reproducible and do not
+      # leak the builder's directory layout.
+      - -trimpath
+
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .CommitDate }}
+
+    # Byte-identical output for a given tag, so anyone can verify a release.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - SECURITY.md
+      # The demo scripts ship with the release: they are how a new user
+      # confirms the tool works on their kernel.
+      - test/*.sh
+
+checksums:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # Built from Conventional Commit prefixes, which is why CONTRIBUTING.md asks
+  # for them.
+  use: github
+  sort: asc
+
+  filters:
+    exclude:
+      - "^chore:"
+      - "^ci:"
+      - "^test:"
+      - "^docs:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge branch
+
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Performance
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Other
+      order: 999
+
+release:
+  draft: false
+  prerelease: auto
+
+  header: |
+    ## KrnlSentry {{ .Tag }}
+
+    eBPF syscall monitoring and threat detection for Linux.
+
+  footer: |
+    ### Installing
+
+    ```bash
+    tar xzf krnlsentry_{{ trimprefix .Tag "v" }}_linux_amd64.tar.gz
+    sudo ./krnlsentry --list-rules
+    sudo ./krnlsentry
+    ```
+
+    **Requires** kernel 5.8+ with `CONFIG_DEBUG_INFO_BTF=y`, and root or
+    `CAP_BPF` + `CAP_PERFMON`. Verify with:
+
+    ```bash
+    ls -l /sys/kernel/btf/vmlinux
+    ```
+
+    Verify the download against `checksums.txt` before running anything as root.

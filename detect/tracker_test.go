@@ -88,7 +88,7 @@ func TestTrackerTTLEviction(t *testing.T) {
 
 	// An event far in the future from a different process triggers a sweep,
 	// which should evict the now-stale first process.
-	future := time.Duration(defaultTTL) + time.Minute
+	future := defaultTTL + time.Minute
 	tr.Record(makeEvent(events.SysSocket, withPID(2), withTimestamp(future)))
 
 	if tr.Len() != 1 {

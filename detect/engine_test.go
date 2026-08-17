@@ -182,8 +182,13 @@ func TestSeverityRoundTrip(t *testing.T) {
 
 // TestSeverityOrdering matters because --min-severity filters with `<`.
 func TestSeverityOrdering(t *testing.T) {
-	if !(SeverityLow < SeverityMedium && SeverityMedium < SeverityHigh && SeverityHigh < SeverityCritical) {
-		t.Fatal("severity constants are not in ascending order; --min-severity filtering would be wrong")
+	ordered := []Severity{SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical}
+
+	for i := 1; i < len(ordered); i++ {
+		if ordered[i-1] >= ordered[i] {
+			t.Fatalf("severity constants are not ascending (%v >= %v); --min-severity filtering would be wrong",
+				ordered[i-1], ordered[i])
+		}
 	}
 }
 

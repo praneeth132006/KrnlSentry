@@ -1,0 +1,60 @@
+name: Detection rule proposal
+description: Suggest a new detection, or report a false positive/negative
+labels: ["detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Detection rules are the cheapest thing to change in this project — a
+        rule is one Go function over an `events.Event` plus process history,
+        with no kernel code involved unless it needs a syscall that is not yet
+        probed. See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md).
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type
+      options:
+        - New detection rule
+        - False positive (alerts on benign activity)
+        - False negative (misses real activity)
+        - Tuning an existing rule
+    validations:
+      required: true
+
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Behaviour to detect
+      description: What does the attacker or program actually do, at the syscall level?
+    validations:
+      required: true
+
+  - type: input
+    id: attack
+    attributes:
+      label: MITRE ATT&CK technique
+      placeholder: "T1055.008 — Process Injection: Ptrace System Calls"
+
+  - type: textarea
+    id: syscalls
+    attributes:
+      label: Syscalls involved
+      description: Which syscalls, and in what order? Note whether any are not currently probed.
+
+  - type: textarea
+    id: false-positives
+    attributes:
+      label: What legitimate software does this too?
+      description: |
+        The most important field. A rule that cannot distinguish itself from
+        normal activity gets muted within a day, and a muted rule detects
+        nothing. If you know what would trip this benignly, say so.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evasion
+    attributes:
+      label: How would someone evade it?
+      description: Every rule has a bypass. Naming it up front is more useful than discovering it later.

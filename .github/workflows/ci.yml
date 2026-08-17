@@ -1,0 +1,166 @@
+name: CI
+
+# CI runs on Ubuntu runners, which is not incidental: this project cannot be
+# compiled anywhere else. The runner needs clang and libbpf to build the eBPF
+# object, and the value of this workflow is that it proves the kernel code
+# compiles and the generated bindings match — the one thing a contributor on a
+# Mac cannot check without Docker.
+#
+# Note what CI does NOT do: it does not load the BPF programs. GitHub-hosted
+# runners do not reliably permit BPF program loading, so attachment and live
+# tracing are verified by test/run-all.sh in a privileged local container. That
+# gap is the reason the unit tests are written to need no kernel at all.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded runs on the same branch; a PR that gets three pushes in a
+  # minute does not need three full builds.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libbpf-dev libelf-dev zlib1g-dev
+
+      - name: Report toolchain versions
+        # Printed unconditionally so a failure months from now can be correlated
+        # with a clang or libbpf version bump on the runner image.
+        run: |
+          clang --version | head -1
+          echo "libbpf headers: $(dpkg -l libbpf-dev | tail -1)"
+          uname -r
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Generate eBPF bindings
+        run: make generate
+
+      - name: Verify formatting
+        # gofmt -l lists misformatted files; a non-empty list fails the build.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: make test
+
+      - name: Build
+        run: make build
+
+      - name: Smoke-test the binary
+        # Confirms the binary actually starts and that the embedded BPF object
+        # loaded far enough to enumerate rules. This does not need privileges.
+        run: |
+          ./bin/krnlsentry --version
+          ./bin/krnlsentry --list-rules
+
+      - name: Verify the BPF object is valid ELF with BTF
+        # A regression that silently produced an object without BTF would break
+        # CO-RE at load time on a user's machine — long after CI passed. Check
+        # it here where it is cheap.
+        run: |
+          sudo apt-get install -y --no-install-recommends linux-tools-common || true
+          obj=$(ls ebpfloader/krnlsentry_x86_bpfel.o)
+          file "$obj"
+          llvm-objdump -h "$obj" | grep -q '\.BTF' \
+            && echo "BTF section present" \
+            || { echo "ERROR: no .BTF section; CO-RE would fail at load time"; exit 1; }
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libbpf-dev libelf-dev zlib1g-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # golangci-lint needs the generated bindings to exist or every file that
+      # references them is reported as broken.
+      - name: Generate eBPF bindings
+        run: make generate
+
+      # Action v8 and golangci-lint v2 are both required, and for the same
+      # reason: the v6 action installs golangci-lint v1, whose newest release
+      # is built with Go 1.24 and refuses outright to load a module targeting
+      # `go 1.25.0` ("the Go language version used to build golangci-lint is
+      # lower than the targeted Go version"). Our go.mod is pinned to 1.25.0 by
+      # cilium/ebpf, so v1 can never work here. .golangci.yml is written in the
+      # v2 config schema to match.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.6.0
+          args: --timeout=5m
+
+  shellcheck:
+    name: Shellcheck test scripts
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The scripts in test/ run as root and create users, setuid files and
+      # network listeners. A quoting bug there is worth catching.
+      - name: Run shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck --severity=warning test/*.sh
+
+  docker:
+    name: Dev container builds
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The dev container is the documented path for macOS and Windows
+      # contributors. If it stops building, they are blocked entirely, so it is
+      # worth a job of its own.
+      - name: Build dev image
+        run: docker build -t krnlsentry-dev .
+
+      - name: Build and test inside the container
+        run: |
+          docker run --rm -v "$PWD":/src krnlsentry-dev make all

@@ -1,0 +1,56 @@
+name: Release
+
+# Builds and publishes release artifacts when a version tag is pushed.
+#
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# Runs on Ubuntu because the release build has to compile the eBPF object first
+# — see the `before` hook in .goreleaser.yaml. There is no cross-platform matrix
+# here on purpose: GoReleaser cross-compiles the Go binary for both
+# architectures from one runner, and the BPF object for both is produced in a
+# single bpf2go pass.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # required to create the GitHub Release
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser builds the changelog from commit history, so a shallow
+          # clone would produce an empty one.
+          fetch-depth: 0
+
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libbpf-dev libelf-dev zlib1g-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      # Refuse to publish a release that does not pass its own tests. A broken
+      # security tool with a version number attached is worse than no release.
+      - name: Test before releasing
+        run: make all
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

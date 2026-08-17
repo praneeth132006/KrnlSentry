@@ -144,9 +144,19 @@ func New(log *slog.Logger) (c *Collector, err error) {
 	col := &Collector{log: log}
 
 	// From here on, any error must undo the work already done.
+	//
+	// A failure to clean up is reported rather than discarded: it would mean
+	// probes are still attached in the kernel after we gave up starting, and
+	// that is worth knowing about — it is the difference between "the agent
+	// failed to start" and "the agent failed to start and left something
+	// behind".
 	defer func() {
-		if err != nil {
-			col.Close()
+		if err == nil {
+			return
+		}
+		if cerr := col.Close(); cerr != nil {
+			log.Error("cleaning up after failed initialisation",
+				slog.Any("error", cerr))
 		}
 	}()
 
@@ -387,10 +397,22 @@ func describeLoadError(err error) error {
 	default:
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
-			// The verifier log is long and the useful part is at the
-			// end, but truncating it hides the actual rejection.
-			// Print it in full; this is a developer-facing failure.
-			return fmt.Errorf("BPF verifier rejected the program: %+v", ve)
+			// The verifier log is long and the useful part is rarely
+			// at the end, so truncating it hides the actual
+			// rejection. %+v prints it in full; this is a
+			// developer-facing failure and the detail is the point.
+			//
+			// The log is rendered to a string first, deliberately.
+			// Passing `ve` straight to Errorf with %+v would format
+			// an error value with a non-wrapping verb, losing the
+			// error chain; passing it with %w would preserve the
+			// chain but print only the one-line summary. Rendering
+			// separately gets both: the full log in the message, and
+			// `err` wrapped so callers can still errors.Is/As their
+			// way down to the cause.
+			verifierLog := fmt.Sprintf("%+v", ve)
+
+			return fmt.Errorf("BPF verifier rejected the program: %s: %w", verifierLog, err)
 		}
 		return fmt.Errorf("loading eBPF objects: %w", err)
 	}
