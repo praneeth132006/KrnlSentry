@@ -1,0 +1,62 @@
+# golangci-lint configuration.
+#
+# Tuned rather than maximal. Every linter enabled below has caught a real class
+# of bug in this codebase or guards an invariant the project depends on;
+# linters that mostly generate churn are left off deliberately, because a lint
+# suite people routinely bypass is worse than a smaller one they trust.
+
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck      # unchecked errors — the project's stated bar is explicit handling everywhere
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - misspell
+    - unconvert
+    - goconst
+    - nilerr        # returning nil after a non-nil error: silently swallowing kernel failures
+    - errorlint     # %w vs %v, and errors.Is/As over == comparisons
+    - copyloopvar
+    - durationcheck # multiplying two durations, which is almost always a units bug
+
+  settings:
+    errcheck:
+      # Deliberate no-op closes on shutdown paths, where the only possible
+      # failure is "already closed" and that is the desired state.
+      exclude-functions:
+        - (io.Closer).Close
+
+    goconst:
+      min-len: 4
+      min-occurrences: 4
+
+  exclusions:
+    rules:
+      # Test files get more latitude: repeated literals in table tests are the
+      # readable form, not duplication worth extracting.
+      - path: _test\.go
+        linters:
+          - goconst
+          - errcheck
+
+      # bpf2go output. Not ours to lint or to fix.
+      - path: ebpfloader/krnlsentry_.*\.go
+        linters:
+          - unused
+          - staticcheck
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
