@@ -38,6 +38,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         clang \
         llvm \
+        gcc \
+        libc6-dev \
         libbpf-dev \
         libelf-dev \
         zlib1g-dev \

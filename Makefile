@@ -89,7 +89,9 @@ build: generate ## Build the krnlsentry binary into ./bin
 
 .PHONY: test
 test: generate ## Run unit tests
-	go test -race -count=1 ./...
+	# CGO_ENABLED=1 only here: -race requires cgo, while the shipped binary
+	# is built with cgo off so it stays static and dependency-free.
+	CGO_ENABLED=1 go test -race -count=1 ./...
 
 .PHONY: cover
 cover: generate ## Run tests and write a coverage profile
