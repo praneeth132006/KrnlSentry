@@ -389,6 +389,7 @@ func printSummary(log *slog.Logger, collector *ebpfloader.Collector, engine *det
 	fmt.Fprintf(os.Stderr, "\n── summary ─────────────────────────────\n")
 	fmt.Fprintf(os.Stderr, "  events observed : %d\n", c.observed.Load())
 	fmt.Fprintf(os.Stderr, "  alerts raised   : %d\n", c.alerts.Load())
+	fmt.Fprintf(os.Stderr, "  rules enabled   : %d\n", len(engine.Rules()))
 
 	if statsErr == nil {
 		fmt.Fprintf(os.Stderr, "  kernel events   : %d\n", kernelStats.Events)
@@ -417,8 +418,6 @@ func printSummary(log *slog.Logger, collector *ebpfloader.Collector, engine *det
 			slog.Uint64("dropped", totalDropped),
 			slog.String("mitigation", "reduce scope with --pid, or disable --verbose"))
 	}
-
-	_ = engine
 }
 
 // printRules lists the rule registry with the ATT&CK techniques each can report.

@@ -28,10 +28,18 @@ linters:
 
   settings:
     errcheck:
-      # Deliberate no-op closes on shutdown paths, where the only possible
-      # failure is "already closed" and that is the desired state.
       exclude-functions:
+        # Deliberate no-op closes on shutdown paths, where the only possible
+        # failure is "already closed" — which is the desired state anyway.
         - (io.Closer).Close
+        # Writing the human-readable banner and summary to the terminal. If
+        # stderr is broken there is nowhere left to report that fact, so these
+        # returns are genuinely not actionable. Alert writes are a different
+        # matter and *are* checked — see process() in cmd/krnlsentry.
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        - os.Setenv
 
     goconst:
       min-len: 4
