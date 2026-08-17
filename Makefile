@@ -84,7 +84,13 @@ $(GEN_STAMP): $(BPF_SRC) $(BPF_HDRS) $(MAKEFILE_LIST)
 .PHONY: build
 build: generate ## Build the krnlsentry binary into ./bin
 	@mkdir -p $(BIN_DIR)
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(CMD_PKG)
+	# -buildvcs=false: Go otherwise shells out to git to stamp VCS metadata,
+	# which fails hard ("error obtaining VCS status: exit status 128") whenever
+	# the checkout is owned by a different uid than the build user — exactly
+	# what happens when a CI runner's workspace is bind-mounted into the dev
+	# container. We stamp our own version through LDFLAGS above, so Go's
+	# stamping is redundant anyway.
+	go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(CMD_PKG)
 	@echo "built $(BIN_DIR)/$(BINARY) ($(VERSION))"
 
 .PHONY: test

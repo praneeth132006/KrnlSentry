@@ -121,9 +121,16 @@ jobs:
       - name: Generate eBPF bindings
         run: make generate
 
-      - uses: golangci/golangci-lint-action@v6
+      # Action v8 and golangci-lint v2 are both required, and for the same
+      # reason: the v6 action installs golangci-lint v1, whose newest release
+      # is built with Go 1.24 and refuses outright to load a module targeting
+      # `go 1.25.0` ("the Go language version used to build golangci-lint is
+      # lower than the targeted Go version"). Our go.mod is pinned to 1.25.0 by
+      # cilium/ebpf, so v1 can never work here. .golangci.yml is written in the
+      # v2 config schema to match.
+      - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.6.0
           args: --timeout=5m
 
   shellcheck:
