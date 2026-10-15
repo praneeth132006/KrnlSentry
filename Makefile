@@ -118,6 +118,50 @@ lint: generate ## Run golangci-lint if available
 		&& golangci-lint run ./... \
 		|| echo "golangci-lint not installed; skipping (see CONTRIBUTING.md)"
 
+.PHONY: replay-demo
+replay-demo: ## Replay the bundled intrusion capture (no root, works on macOS)
+	go run $(CMD_PKG) --replay testdata/captures/intrusion.jsonl --output "$${TMPDIR:-/tmp}/krnlsentry-replay.jsonl"
+
+# The demo target. Paced replay plus the live dashboard, which together show the
+# thing the project is actually about: a storyline assembling itself out of
+# unrelated-looking alerts, in order, as the intrusion unfolds.
+#
+# SPEED is a divisor on the capture's own inter-event gaps. The bundled capture
+# spans 34 seconds, so the default 2 runs the demo in about 17.
+SPEED ?= 2
+
+.PHONY: demo
+demo: ## Paced replay of the bundled intrusion on the live dashboard (no root, any OS)
+	go run $(CMD_PKG) \
+		--replay testdata/captures/intrusion.jsonl \
+		--output "$${TMPDIR:-/tmp}/krnlsentry-demo.jsonl" \
+		--replay-speed $(SPEED) \
+		--dashboard
+
+.PHONY: demo-live
+demo-live: build ## Live capture on the dashboard (Linux, needs root or CAP_BPF+CAP_PERFMON)
+	sudo $(BIN_DIR)/$(BINARY) --dashboard --output "$${TMPDIR:-/tmp}/krnlsentry-demo.jsonl"
+
+# Everything a demo depends on, checked in one command before anyone is
+# watching: the build, the unit tests, and a replay whose alert counts are
+# asserted rather than eyeballed.
+# Not dependent on the `build`/`test` targets: those regenerate the eBPF object
+# and so need clang with a BPF target, which the laptop a demo is given from may
+# not have. Everything here runs through the replay path, which is pure Go.
+.PHONY: verify
+verify: ## Pre-demo check: compile, unit tests and the demo replay (no eBPF toolchain)
+	go build ./...
+	CGO_ENABLED=1 go test -race -count=1 ./...
+	@./test/demo-check.sh
+
+.PHONY: demo-check
+demo-check: ## Assert the bundled capture still produces the expected alerts
+	@./test/demo-check.sh
+
+.PHONY: capture-fixture
+capture-fixture: ## Regenerate testdata/captures/intrusion.jsonl
+	go run ./internal/gencapture > testdata/captures/intrusion.jsonl
+
 .PHONY: run
 run: build ## Build and run system-wide (needs root or CAP_BPF+CAP_PERFMON)
 	sudo $(BIN_DIR)/$(BINARY)

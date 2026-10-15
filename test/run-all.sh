@@ -9,7 +9,8 @@
 #   sudo ./test/run-all.sh --binary ./bin/krnlsentry
 #
 # This is the end-to-end check: it starts the agent, runs all four scenarios,
-# stops the agent, and asserts that each rule produced at least one alert. It
+# stops the agent, and asserts that each rule produced at least one alert and
+# that the correlator stitched them into an attack chain. It
 # exits non-zero if any rule failed to fire, which makes it usable as a smoke
 # test rather than only as a demo.
 
@@ -123,7 +124,10 @@ printf '  %s alerts written to %s\n\n' "$total" "$ALERTS"
 # name is a stable part of the output contract, so this is safe.
 failures=0
 for rule in privilege-escalation sensitive-file-access process-injection reverse-shell; do
-	count=$(grep -c "\"rule\":\"$rule\"" "$ALERTS" || true)
+	# The story embedded in an attack-chain alert carries a "rule" per step,
+	# so it is cut off the line first: otherwise each chain is counted again
+	# against every rule that contributed to it.
+	count=$(sed 's/"story":.*//' "$ALERTS" | grep -c "\"rule\":\"$rule\"" || true)
 
 	if [[ "$count" -gt 0 ]]; then
 		printf '  \033[1;32m✓\033[0m %-24s %s alert(s)\n' "$rule" "$count"
@@ -132,6 +136,17 @@ for rule in privilege-escalation sensitive-file-access process-injection reverse
 		failures=$((failures + 1))
 	fi
 done
+
+# The scenarios all run as descendants of this script, so the storyline
+# correlator should see one process tree spanning Credential Access, Privilege
+# Escalation, Defense Evasion, Execution and Command and Control — and say so.
+chains=$(sed 's/"story":.*//' "$ALERTS" | grep -c '"rule":"attack-chain"' || true)
+if [[ "$chains" -gt 0 ]]; then
+	printf '  \033[1;32m✓\033[0m %-24s %s alert(s)\n' "attack-chain" "$chains"
+else
+	printf '  \033[1;31m✗\033[0m %-24s no alerts\n' "attack-chain"
+	failures=$((failures + 1))
+fi
 
 printf '\n'
 
@@ -144,4 +159,4 @@ if [[ "$failures" -gt 0 ]]; then
 	ks::fail "$failures rule(s) produced no alerts"
 fi
 
-ks::heading "All four detection rules fired"
+ks::heading "All four detection rules and the storyline correlator fired"

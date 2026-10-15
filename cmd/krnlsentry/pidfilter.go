@@ -169,3 +169,21 @@ func readPPID(pid uint32) (uint32, bool) {
 
 	return uint32(ppid), true
 }
+
+// lookupProc resolves a process's parent and name from /proc, for storyline
+// correlation. It fills gaps for ancestors that have not made a monitored
+// syscall since the agent started — typically the login shell an attacker is
+// typing into, which sits between every alerting child.
+func lookupProc(pid uint32) (uint32, string, bool) {
+	ppid, ok := readPPID(pid)
+	if !ok {
+		return 0, "", false
+	}
+
+	comm, err := os.ReadFile(filepath.Join("/proc", strconv.FormatUint(uint64(pid), 10), "comm"))
+	if err != nil {
+		return 0, "", false
+	}
+
+	return ppid, strings.TrimSpace(string(comm)), true
+}

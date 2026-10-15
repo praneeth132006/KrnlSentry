@@ -84,6 +84,10 @@ func TestEngineMultipleRulesCanFire(t *testing.T) {
 	// collapsing them would lose information.
 	cfg := DefaultConfig()
 	cfg.SelfPID = 0
+	// This test is about rules firing independently. With correlation on,
+	// the same three tactics would also (correctly) raise an attack-chain
+	// alert; that behaviour is covered in storyline_test.go.
+	cfg.Storyline.Enabled = false
 	// Note os.ModeSetuid rather than the Unix octal 0o4755: Go's fs.FileMode
 	// carries setuid as its own bit (1<<23), not in the permission octal, so
 	// 0o4755 would silently be an ordinary file with odd permissions.

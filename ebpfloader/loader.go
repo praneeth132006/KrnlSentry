@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package ebpfloader owns every interaction with the kernel: loading the
 // compiled BPF object, attaching it to tracepoints, draining the ring buffer,
 // and tearing all of it down again.
@@ -9,6 +11,9 @@
 //
 // Nothing here decides what is suspicious. If you find yourself adding a
 // filename or a uid comparison to this file, it belongs in detect/ instead.
+//
+// Linux only; loader_other.go provides the stub that lets the agent build —
+// and --replay run — on any other OS.
 package ebpfloader
 
 import (
@@ -35,19 +40,6 @@ const (
 	statEvents  uint32 = 0
 	statDropped uint32 = 1
 )
-
-// Stats reports what the kernel side has seen.
-//
-// Dropped is the number the operator actually needs: it counts events the
-// kernel could not enqueue because userspace was not draining fast enough.
-// Those events are gone — not delayed — so a non-zero value means this tool's
-// output is incomplete for that window. Reporting it is the difference between
-// a monitor that is honest about its blind spots and one that quietly
-// under-reports.
-type Stats struct {
-	Events  uint64
-	Dropped uint64
-}
 
 // Collector loads the BPF programs, attaches them, and streams decoded events.
 //

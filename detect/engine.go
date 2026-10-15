@@ -52,6 +52,13 @@ type Config struct {
 	// Stat resolves executed paths for the SUID check.
 	Stat StatFunc
 
+	// DedupWindow folds repeats of the same finding (same rule, process and
+	// distinguishing argument) into one alert per window. Zero disables it.
+	DedupWindow time.Duration
+
+	// Storyline configures cross-process correlation into attack chains.
+	Storyline StorylineConfig
+
 	// SelfPID is this agent's own process id. Events from it are dropped in
 	// the kernel already; this is a second, cheap guard so that a change to
 	// the kernel filter cannot reintroduce a self-alerting loop.
@@ -64,6 +71,8 @@ func DefaultConfig() Config {
 		RevShellWindow: 2 * time.Second,
 		DebuggerComms:  []string{"gdb", "gdbserver", "strace", "ltrace", "lldb", "lldb-server"},
 		IgnoreLoopback: false,
+		DedupWindow:    5 * time.Second,
+		Storyline:      DefaultStorylineConfig(),
 		Stat:           os.Stat,
 		SelfPID:        uint32(os.Getpid()),
 	}
@@ -158,9 +167,11 @@ func RuleNames() []string {
 
 // Engine evaluates events against the enabled rules.
 type Engine struct {
-	rules   []Rule
-	tracker *Tracker
-	cfg     Config
+	rules      []Rule
+	tracker    *Tracker
+	correlator *Correlator
+	dedup      *deduper
+	cfg        Config
 }
 
 // NewEngine builds an engine running the named rules.
@@ -178,8 +189,10 @@ func NewEngine(cfg Config, enabled []string) (*Engine, error) {
 	}
 
 	e := &Engine{
-		tracker: NewTracker(),
-		cfg:     cfg,
+		tracker:    NewTracker(),
+		correlator: NewCorrelator(cfg.Storyline),
+		dedup:      newDeduper(cfg.DedupWindow),
+		cfg:        cfg,
 	}
 
 	if len(enabled) == 0 {
@@ -227,6 +240,28 @@ func (e *Engine) Rules() []Rule { return e.rules }
 // forget exited processes.
 func (e *Engine) Tracker() *Tracker { return e.tracker }
 
+// Correlating reports whether storyline correlation is enabled.
+func (e *Engine) Correlating() bool { return e.correlator != nil }
+
+// EngineStats summarises post-rule processing, for the shutdown summary.
+type EngineStats struct {
+	Suppressed   uint64 // alerts folded by deduplication
+	Storylines   int    // storylines currently open
+	AttackChains uint64 // attack-chain alerts raised
+}
+
+// Stats reports deduplication and correlation counters.
+func (e *Engine) Stats() EngineStats {
+	st := EngineStats{
+		Storylines:   e.correlator.Storylines(),
+		AttackChains: e.correlator.Chains(),
+	}
+	if e.dedup != nil {
+		st.Suppressed = e.dedup.total
+	}
+	return st
+}
+
 // Evaluate runs every enabled rule against one event.
 //
 // The tracker is updated before rules run, so a rule looking at History sees
@@ -241,6 +276,8 @@ func (e *Engine) Evaluate(ev events.Event) []*Alert {
 		return nil
 	}
 
+	e.correlator.Observe(ev)
+
 	history := e.tracker.Record(ev)
 
 	ctx := Context{
@@ -251,8 +288,20 @@ func (e *Engine) Evaluate(ev events.Event) []*Alert {
 
 	var alerts []*Alert
 	for _, r := range e.rules {
-		if alert := r.Eval(ctx); alert != nil {
+		alert := r.Eval(ctx)
+		if alert == nil {
+			continue
+		}
+
+		// Correlate before deduplicating: a folded repeat is still
+		// evidence of the tactic, and the storyline should count it.
+		chain := e.correlator.Correlate(ev, alert)
+
+		if e.dedup.admit(alert, ev.Timestamp) {
 			alerts = append(alerts, alert)
+		}
+		if chain != nil {
+			alerts = append(alerts, chain)
 		}
 	}
 
