@@ -7,6 +7,23 @@
 > are dangerous, but because they generate genuine security alerts, and a
 > colleague investigating your fake reverse shell at 2am will not find it funny.
 
+## Without Linux or root: `demo-check.sh`
+
+Everything below needs a live kernel and root. [`demo-check.sh`](demo-check.sh)
+does not: it drives the agent's replay path over the bundled intrusion capture
+and asserts the result — CLI flags, per-rule alert counts, the `0600` alert log,
+storyline and story fields, the dashboard's panels and its refusal to paint into
+a pipe, that pacing does not change the verdict, and that `--pid` excludes an
+out-of-tree process.
+
+```bash
+make verify        # go build + unit tests under -race + demo-check.sh
+./test/demo-check.sh
+```
+
+Run it before giving a demo. It exits non-zero on any failed check, and it is
+the only pre-demo check that runs on macOS.
+
 ## Running everything
 
 ```bash
@@ -25,6 +42,14 @@ so it works as a smoke test and not only as a demo.
   ✓ sensitive-file-access    17 alert(s)
   ✓ process-injection        1 alert(s)
   ✓ reverse-shell            1 alert(s)
+  ✓ attack-chain             2 alert(s)
+```
+
+Add `--dashboard` to watch it on the live display instead of as a stream:
+
+```bash
+sudo ./bin/krnlsentry --dashboard &
+sudo ./test/01-sensitive-file.sh
 ```
 
 In a container you need `--privileged` (or `CAP_BPF` + `CAP_PERFMON`) and

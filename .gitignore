@@ -11,6 +11,8 @@
 
 # Runtime artifacts
 *.jsonl
+# …except golden captures, which the replay tests read.
+!testdata/captures/*.jsonl
 /alerts.jsonl
 /debug.jsonl
 

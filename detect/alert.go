@@ -124,6 +124,19 @@ type Alert struct {
 	// without it you cannot tell which of several rules produced an alert,
 	// which makes tuning and --rules filtering guesswork.
 	Rule string `json:"rule"`
+
+	// Storyline groups alerts raised anywhere in the same process tree, so a
+	// SIEM can pivot from one alert to everything related to it with a
+	// single equality filter. Empty when correlation is disabled.
+	Storyline string `json:"storyline,omitempty"`
+
+	// Suppressed counts identical alerts folded into this one by the
+	// deduplicator since the previous emission. Zero means none.
+	Suppressed uint64 `json:"suppressed,omitempty"`
+
+	// Story is the ordered evidence behind an attack-chain alert: one step
+	// per contributing alert. Absent on every other rule.
+	Story []StoryStep `json:"story,omitempty"`
 }
 
 // newAlert builds an Alert from the event that triggered it, filling in every

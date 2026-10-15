@@ -72,6 +72,17 @@ func (s Syscall) String() string {
 	return "unknown(" + itoa(uint64(s)) + ")"
 }
 
+// ParseSyscall is the inverse of String for every syscall this build knows.
+// Used by replay, where captures name syscalls rather than number them.
+func ParseSyscall(name string) (Syscall, bool) {
+	for sc, n := range syscallNames {
+		if n == name && sc != SysUnknown {
+			return sc, true
+		}
+	}
+	return SysUnknown, false
+}
+
 // IsExecution reports whether the syscall replaces the process image.
 // Both forms matter: execveat with AT_EMPTY_PATH is the standard fileless
 // execution technique, so rules that only consider execve have a blind spot.

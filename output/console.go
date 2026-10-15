@@ -144,6 +144,8 @@ func (s *ConsoleSink) format(a *detect.Alert) string {
 			fmt.Fprintf(&b, "              %s%s%s\n", ansiDim, args, ansiReset)
 		}
 
+		writeExtras(&b, a, ansiDim, ansiReset)
+
 		return b.String()
 	}
 
@@ -156,7 +158,31 @@ func (s *ConsoleSink) format(a *detect.Alert) string {
 		fmt.Fprintf(&b, "              %s\n", args)
 	}
 
+	writeExtras(&b, a, "", "")
+
 	return b.String()
+}
+
+// writeExtras prints the fold count and, for attack-chain alerts, the story
+// as a timeline — the one place where a multi-line alert earns its height,
+// because the order of events *is* the finding.
+func writeExtras(b *strings.Builder, a *detect.Alert, dim, reset string) {
+	if a.Suppressed > 0 {
+		fmt.Fprintf(b, "              %s(+%d identical alert(s) folded since last shown)%s\n", dim, a.Suppressed, reset)
+	}
+
+	for i, st := range a.Story {
+		branch := "├─"
+		if i == len(a.Story)-1 {
+			branch = "└─"
+		}
+		fmt.Fprintf(b, "              %s %s+%-7s%s %-18s %-32s %s\n",
+			branch,
+			dim, fmt.Sprintf("%dms", st.OffsetMS), reset,
+			fmt.Sprintf("%s[%d]", st.Comm, st.PID),
+			st.Tactic,
+			st.Summary)
+	}
 }
 
 // formatArgs renders the decoded arguments as sorted key=value pairs.

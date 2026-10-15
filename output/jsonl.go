@@ -109,26 +109,6 @@ type EventSink struct {
 	path string
 }
 
-// debugRecord is the on-disk shape of a raw event.
-//
-// A distinct type from events.Event so that the debug format can carry the
-// decoded fields and omit the ones that are noise, without the internal Event
-// struct growing JSON tags for a use case it does not own.
-type debugRecord struct {
-	Timestamp string            `json:"timestamp"`
-	Monotonic uint64            `json:"monotonic_ns"`
-	PID       uint32            `json:"pid"`
-	TID       uint32            `json:"tid"`
-	PPID      uint32            `json:"ppid"`
-	UID       uint32            `json:"uid"`
-	GID       uint32            `json:"gid"`
-	Comm      string            `json:"comm"`
-	Syscall   string            `json:"syscall"`
-	Exit      bool              `json:"exit,omitempty"`
-	Ret       int64             `json:"ret,omitempty"`
-	Args      map[string]string `json:"args,omitempty"`
-}
-
 // NewEventSink opens a debug log for appending.
 func NewEventSink(path string) (*EventSink, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -152,23 +132,9 @@ func (s *EventSink) WriteEvent(ev events.Event) error {
 		return fmt.Errorf("debug log %q is closed", s.path)
 	}
 
-	rec := debugRecord{
-		Timestamp: ev.Wall.UTC().Format("2006-01-02T15:04:05.000Z"),
-		Monotonic: ev.Timestamp,
-		PID:       ev.PID,
-		TID:       ev.TID,
-		PPID:      ev.PPID,
-		UID:       ev.UID,
-		GID:       ev.GID,
-		Comm:      ev.Comm,
-		Syscall:   ev.Syscall,
-		Exit:      ev.IsExit,
-		Args:      ev.Args,
-	}
-
-	if ev.IsExit {
-		rec.Ret = ev.ReturnValue
-	}
+	// events.Record is the lossless form, so a capture written here can be
+	// fed back through --replay and reproduce the same alerts.
+	rec := events.NewRecord(ev)
 
 	if err := s.enc.Encode(rec); err != nil {
 		return fmt.Errorf("writing event to %q: %w", s.path, err)
