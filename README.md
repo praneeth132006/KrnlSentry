@@ -8,6 +8,13 @@ privilege escalation, credential theft, process injection and reverse shells.
 Alerts are tagged with [MITRE ATT&CK](https://attack.mitre.org/) technique IDs
 and written as JSON Lines alongside a colour-coded terminal stream.
 
+On top of the per-syscall rules sits an **attack-storyline correlator**: it
+tracks process lineage, rolls every alert up to its ATT&CK *tactic*, and when one
+process tree spans several distinct attacker goals it raises a single
+`attack-chain` incident with the whole story in order. Every capture can also be
+**replayed offline** — on any OS, without root — to regression-test rules or
+retro-hunt old telemetry with new ones.
+
 ```
 15:04:23.117  CRITICAL  reverse-shell    python3[22116]    uid=0  T1059
               Process "python3" (PID 22116, UID 0) completed socket → connect to
@@ -28,6 +35,10 @@ and written as JSON Lines alongside a colour-coded terminal stream.
 - [Why eBPF](#why-ebpf)
 - [Architecture](#architecture)
 - [Detections](#detections)
+- [Attack storylines](#attack-storylines)
+- [The live dashboard](#the-live-dashboard)
+- [Replay and retro-hunting](#replay-and-retro-hunting)
+- [Running the demo](#running-the-demo)
 - [Requirements](#requirements)
 - [Building](#building)
 - [Usage](#usage)
@@ -100,6 +111,12 @@ literals — no kernel, no root, no privileged CI runner.
 │                          │    ▼                                       │ │
 │                          │  Rules: privesc · sensitive-file ·         │ │
 │                          │         ptrace-injection · reverse-shell   │ │
+│                          │    │                                       │ │
+│                          │    ▼                                       │ │
+│                          │  Correlator ─ lineage → storyline →        │ │
+│                          │    │          ATT&CK tactics → attack-chain│ │
+│                          │    ▼                                       │ │
+│                          │  Dedup ────── fold repeats per window      │ │
 │                          │                                            │ │
 │                          │  Pure functions. No eBPF. No I/O except    │ │
 │                          │  an injected Stat for the SUID check.      │ │
@@ -107,8 +124,10 @@ literals — no kernel, no root, no privileged CI runner.
 │                                              │ detect.Alert             │
 │                          ┌───────────────────▼────────────────────────┐ │
 │                          │ output/                                    │ │
-│                          │   JSONLSink  → alerts.jsonl (0600, append) │ │
+│                          │   JSONLSink   → alerts.jsonl (0600, append)│ │
 │                          │   ConsoleSink → stdout, colour by severity │ │
+│                          │   Dashboard   → full-screen live totals    │ │
+│                          │                 (--dashboard, opt-in)      │ │
 │                          └────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -120,10 +139,12 @@ literals — no kernel, no root, no privileged CI runner.
 | `bpf/`          | eBPF C programs, shared event struct, minimal CO-RE header              | —                     |
 | `ebpfloader/`   | Loading, attaching, ring buffer draining. **Only** user of cilium/ebpf  | `events`              |
 | `events/`       | Canonical `Event` type, syscall argument decoding                       | stdlib only           |
-| `detect/`       | Rule registry, process state tracker, the four detection rules          | `events`              |
-| `output/`       | JSONL and console sinks                                                 | `detect`              |
+| `detect/`       | Rule registry, process state tracker, the four detection rules, storyline correlator, deduplication | `events` |
+| `output/`       | JSONL, console and dashboard sinks                                      | `detect`              |
 | `cmd/krnlsentry/` | CLI, signal handling, pipeline wiring                                 | all of the above      |
 | `test/`         | Safe demo scripts that trigger each detection                           | —                     |
+| `testdata/captures/` | Golden `--verbose` captures replayed by the unit tests             | —                     |
+| `internal/gencapture/` | Generator for the golden capture, built on the real decoder      | `events`              |
 
 ### Design decisions worth knowing
 
@@ -172,6 +193,8 @@ buildable in a container on a Mac.
 | `process-injection` | `ptrace()` with `ATTACH`, `SEIZE`, `POKETEXT`, `POKEDATA`, `POKEUSER`, `SETREGS`, `SETREGSET`, `SETFPREGS` from a non-allowlisted process | [T1055.008](https://attack.mitre.org/techniques/T1055/008/) | HIGH |
 | `reverse-shell` | `socket` → `connect` → `dup2`/`dup3` onto ≥2 standard fds → `execve`, within one PID inside a 2s window | [T1059](https://attack.mitre.org/techniques/T1059/) | CRITICAL |
 
+| `attack-chain` | ≥ `--chain-threshold` distinct ATT&CK tactics across one process tree (see [below](#attack-storylines)) | all of the above | CRITICAL |
+
 Run `krnlsentry --list-rules` for the same table from the binary itself.
 
 ### What makes the reverse-shell rule interesting
@@ -183,6 +206,204 @@ window**. KrnlSentry additionally captures the fd that `socket()` returned (via
 a `sys_exit` probe) and confirms it is the same fd being duplicated onto
 stdin/stdout/stderr — reported as `chain_socket_fd_confirmed`, which rules out
 the coincidence of a program that opens a socket and separately redirects a file.
+
+---
+
+## Attack storylines
+
+Every rule above judges one process at one moment. Intrusions do not look like
+that. They look like a login shell whose children, one after another, read
+`~/.aws/credentials`, `ptrace` the shell, call `setuid(0)` and dial out — four
+alerts, four PIDs, four rules, landing in a queue as four unrelated items.
+
+The correlator puts them back together:
+
+```
+11:00:33.731  CRITICAL attack-chain   python3[4150]   uid=1000  T1552.001,T1055.008,T1548,T1059
+              Multi-stage attack in the process tree of bash[4100]: Credential Access → Defense
+              Evasion → Privilege Escalation → Execution → Command and Control
+              (5 tactics, 4 alerts, 4 processes, 18.041s)
+              ├─ +0ms      cat[4120]       Credential Access                openat /home/dev/.aws/credentials
+              ├─ +6002ms   inject[4130]    Defense Evasion                  ptrace PTRACE_ATTACH → pid 4100
+              ├─ +11005ms  exploit[4140]   Privilege Escalation             setuid(0)
+              └─ +18041ms  python3[4150]   Execution + Command and Control  reverse shell to 10.13.37.9:4444
+```
+
+How it works:
+
+1. **Lineage.** Every event — alerting or not — records `pid → (ppid, comm)`.
+   The shell *between* two alerting children is usually the one process that
+   never alerts, so lineage must come from the whole stream. Gaps (an ancestor
+   that has not made a monitored syscall since startup) are filled from `/proc`.
+2. **Session boundaries.** From an alerting process the correlator walks up the
+   tree and stops *below* the process that owns the session — `sshd`,
+   `systemd`, `containerd-shim`, `cron`, `tmux`, PID 1. Without this every
+   process shares `init` as an ancestor and the host becomes one story; with it,
+   each SSH login, container and daemon is its own scope.
+3. **Storylines.** An alert joins the open storyline any process in its chain
+   already belongs to. If its chain touches two storylines they merge, keeping
+   the older id. Every alert carries a `storyline` field, so a SIEM can pivot
+   from any one alert to everything related with one equality filter.
+4. **Tactics, not volume.** Each alert's technique rolls up to an ATT&CK tactic
+   (a completed reverse shell counts as both Execution and Command and
+   Control). A storyline raises `attack-chain` when it spans
+   `--chain-threshold` distinct tactics (default 3), and again each time it
+   gains a new one. A process reading `/etc/shadow` fifty times is one tactic,
+   however loud; three different attacker goals in one tree within minutes is
+   the shape of an intrusion and almost never the shape of administration.
+
+Storylines close after `--chain-window` (default 10 minutes) without a new
+alert. Disable the whole thing with `--no-storyline`.
+
+### Deduplication
+
+A process opening `/etc/shadow` in a loop is one finding, not ten thousand.
+Identical alerts — same rule, process, technique and distinguishing argument
+(path, ptrace target, destination) — are folded for `--dedup-window` (default
+5s). The window is fixed from the first emission, not sliding, so a steady loop
+still resurfaces once per window; the resurfaced alert carries `suppressed: N`.
+Folded alerts are still counted as evidence by the correlator.
+
+---
+
+## The live dashboard
+
+`--dashboard` replaces the scrolling alert stream with a full-screen display
+that repaints four times a second:
+
+```
+╭─ KrnlSentry v0.4.0 · LIVE · system-wide ─────────────────────────────────── 00:04:12 ╮
+   events 182 417  alerts 7  folded 11  tracked 94  drops 0
+╰──────────────────────────────────────────────────────────────────────────────────────╯
+
+  SEVERITY ─────────────────────────────  RULES ────────────────────────────────────────
+  CRITICAL ████████████████████████ 3     privilege-escalation                     1
+  HIGH     ████████████████████████ 3     sensitive-file-access                    2
+  MEDIUM   ████████                 1     process-injection                        1
+  LOW                               0     reverse-shell                            1
+                                          attack-chain                             2
+
+  ATT&CK TACTICS ─────────────────────────────────────────────────────────────────────
+   ● Execution   ● Privilege Escalation   ● Defense Evasion   ● Credential Access
+   ● Command and Control
+
+  TOP PROCESSES ──────────────────────────────────────────────────────────────────────
+   exploit[4140] ×2   python3[4150] ×2   cat[4120] ×1   inject[4130] ×1
+
+  ATTACK CHAIN   open storylines 2   chains raised 2 ─────────────────────────────────
+    CRITICAL  Multi-stage attack in the process tree of bash[4100]: Credential Access…
+   ├─ +0ms      cat[4120]        Credential Access     openat /home/dev/.aws/credentials
+   ├─ +6002ms   inject[4130]     Defense Evasion       ptrace PTRACE_ATTACH → pid 4100
+   ├─ +11005ms  exploit[4140]    Privilege Escalation  setuid(0)
+   └─ +18041ms  python3[4150]    Execution + C2        reverse shell to 10.13.37.9:4444
+
+  RECENT ALERTS   7 total ────────────────────────────────────────────────────────────
+   11:00:33.731  CRITICAL  attack-chain          python3[4150]   T1059      Multi-stage…
+   11:00:33.731  CRITICAL  reverse-shell         python3[4150]   T1059      Process "py…
+   11:00:26.695  HIGH      privilege-escalation  exploit[4140]   T1548      Process "ex…
+   11:00:21.692  HIGH      process-injection     inject[4130]    T1055.008  Process "in…
+
+╰─ alerts → /var/log/krnlsentry.jsonl ───────────────────────────────────── Ctrl+C to stop ╯
+```
+
+It is **opt-in, and off by default, on purpose.** A line per alert on stdout
+pipes, greps, redirects and reads fine over SSH; a full-screen display owns the
+terminal and turns into garbage the moment anyone redirects it. So the default
+stays the stream, and `--dashboard` refuses to start when stdout is not a
+terminal — it says so and falls back rather than writing escape codes into
+somebody's log file. (`--color` forces it anyway, which is what recording a
+demo needs.)
+
+What it buys when a human *is* watching is the thing a stream cannot give:
+**standing totals**. Mid-incident the question is rarely "what was the last
+alert" — it is how many, how bad, which rules, which processes, is a chain
+forming, and *are we dropping events*. On a busy host all of that scrolls off
+the top within seconds.
+
+Four details worth knowing:
+
+- **Zero rows are kept.** `CRITICAL 0` and `reverse-shell 0` are information:
+  they say the rule is armed and quiet. An absent row cannot distinguish that
+  from a rule that is not running.
+- **Drops are never hidden.** Kernel ring-buffer drops and queue drops are
+  summed into one figure that turns red the moment it is non-zero. A monitoring
+  tool that quietly discarded events looks exactly like one that saw nothing.
+- **`--min-severity` filters the feed, not the totals.** It is for quietening
+  what competes for attention, not for unseeing the host, so the headline counts
+  always describe the whole run.
+- **The last frame is left on screen.** On Ctrl+C the display is not erased, so
+  the run's totals sit above the shutdown summary where they can still be read.
+
+Everything on screen is counted from the alerts the engine raised or read
+through a metrics snapshot taken on the pipeline's own goroutine. The dashboard
+is a `Sink` like any other and decides nothing: `detect/` remains the only
+package with an opinion about what is suspicious.
+
+---
+
+## Replay and retro-hunting
+
+`--verbose` writes every observed syscall to a lossless JSONL capture. `--replay`
+feeds a capture back through exactly the same scope filter, engine and sinks:
+
+```bash
+sudo ./bin/krnlsentry --verbose --debug-output capture.jsonl     # record (Linux)
+./bin/krnlsentry --replay capture.jsonl --output replayed.jsonl  # replay (any OS, no root)
+make replay-demo                                                  # bundled intrusion capture
+```
+
+That makes three things possible that live tracing cannot do:
+
+- **Rule development without eBPF.** The agent builds natively on macOS and
+  Windows (the eBPF loader is replaced by a stub off Linux), so a new rule can
+  be written and exercised against real captures on a laptop.
+- **Retro-hunting.** Run a rule written today over last week's capture.
+- **Reproducing false positives** from the reporter's capture instead of a
+  description of it.
+
+`testdata/captures/intrusion.jsonl` is a golden capture — an SSH session
+carrying the intrusion above, interleaved with ordinary activity and a cron job
+reading `/etc/shadow` in a loop — and `TestReplayGoldenCapture` pins exactly
+which alerts, folds and attack chains it must produce.
+
+---
+
+## Running the demo
+
+No root, no kernel, no Linux — the demo runs through the replay path, so it
+works on the laptop you are presenting from:
+
+```bash
+make verify   # compile, unit tests, and an asserted end-to-end demo replay
+make demo     # the bundled intrusion, paced, on the live dashboard
+```
+
+`make demo` replays `testdata/captures/intrusion.jsonl` against *its own clock*
+(`--replay-speed`, default `2`, so the captured 34 seconds take about 17) with
+the dashboard on. Pacing matters here: replayed as fast as the file can be read,
+every alert and both attack chains land in a single frame, and the one thing
+worth showing — a storyline assembling itself out of alerts that look unrelated
+one at a time — is invisible. Watch for the moment the third tactic appears in
+one process tree and the CRITICAL `attack-chain` row fills in its timeline.
+
+```bash
+make demo SPEED=1     # real time
+make demo SPEED=8     # hurry up
+make demo-live        # the real thing: live kernel, Linux, needs root
+```
+
+For a full presentation script — what to run, in what order, what to say about
+each panel, the likely questions with answers, and a fallback for everything
+that can fail in a room with a projector — see **[DEMO.md](DEMO.md)**. The
+design rationale, diagrams, results and limitations are written up in
+**[REPORT.md](REPORT.md)**.
+
+Run `make verify` **before** demoing. It is the pre-flight check: it compiles,
+runs the unit tests under `-race`, and then runs
+[`test/demo-check.sh`](test/demo-check.sh), which exercises the actual binary —
+CLI flags, the JSONL sink, scope filtering, pacing and the dashboard renderer —
+and asserts the result rather than leaving it to be eyeballed. The unit tests
+pin the engine; this pins the demo path around it.
 
 ---
 
@@ -280,6 +501,7 @@ sudo ./bin/krnlsentry --pid 1234                       # one process tree
 sudo ./bin/krnlsentry --rules reverse-shell            # one rule
 sudo ./bin/krnlsentry --output /var/log/krnlsentry.jsonl --min-severity HIGH
 sudo ./bin/krnlsentry --verbose                        # log every syscall too
+sudo ./bin/krnlsentry --dashboard                      # live full-screen display
 ```
 
 | Flag | Default | Description |
@@ -295,6 +517,13 @@ sudo ./bin/krnlsentry --verbose                        # log every syscall too
 | `--ignore-self-proc` | off | Suppress alerts for a process reading its own `/proc` entry |
 | `--stats-interval <duration>` | off | Periodic throughput logging |
 | `--no-color` / `--color` | auto | Override terminal detection (`NO_COLOR` is honoured) |
+| `--dedup-window <duration>` | `5s` | Fold identical alerts into one per window (`0` disables) |
+| `--no-storyline` | off | Disable storyline correlation and `attack-chain` alerts |
+| `--chain-threshold <int>` | `3` | Distinct ATT&CK tactics in one process tree that raise `attack-chain` |
+| `--chain-window <duration>` | `10m` | How long a storyline stays open after its last alert |
+| `--replay <path>` | | Evaluate a `--verbose` capture instead of the live kernel (no root, any OS) |
+| `--replay-speed <float>` | `0` | Pace a replay against the capture's own clock: `1` = real time, `2` = twice as fast, `0` = as fast as possible |
+| `--dashboard` | off | Full-screen live display instead of the scrolling stream (needs a terminal; `--color` forces it) |
 | `--list-rules` | | Print the rule table and exit |
 
 Stop with **Ctrl+C**. The agent detaches every probe, flushes and `fsync`s the
@@ -341,6 +570,9 @@ One JSON object per line, append-only, mode `0600`.
 | `args` | Decoded, syscall-specific. Flags are symbolic (`O_RDONLY\|O_CLOEXEC`), not numeric |
 | `severity` | `LOW` / `MEDIUM` / `HIGH` / `CRITICAL` |
 | `rule` | Which rule fired — stable, safe to build filters on |
+| `storyline` | Id shared by every alert from the same process tree (omitted with `--no-storyline`) |
+| `suppressed` | Identical alerts folded into this one since it was last shown (omitted when zero) |
+| `story` | `attack-chain` only: ordered steps, each with `offset_ms`, `pid`, `comm`, `rule`, `mitre_id`, `tactic`, `summary` |
 
 JSONL rather than a JSON array so the file is valid at every instant: a tool
 killed with `SIGKILL` leaves a complete file minus at most one line, whereas an
@@ -368,9 +600,12 @@ sudo ./test/run-all.sh
   ✓ sensitive-file-access    17 alert(s)
   ✓ process-injection        1 alert(s)
   ✓ reverse-shell            1 alert(s)
+  ✓ attack-chain             2 alert(s)
 ```
 
-It exits non-zero if any rule fails to fire.
+It exits non-zero if any rule fails to fire, or if the correlator fails to
+stitch the four scenarios — all descendants of the runner — into an attack
+chain.
 
 > **Run these in a throwaway VM or container only.** They are safe by
 > construction — the privilege-escalation syscalls are *expected to fail with
@@ -381,6 +616,27 @@ It exits non-zero if any rule fails to fire.
 > at 2am will not find it funny.
 
 See [test/README.md](test/README.md) for what each scenario does.
+
+The scenario scripts need Linux and root. For everything that does not —
+the CLI, the JSONL contract, scope filtering, replay pacing and the dashboard —
+`make verify` runs the unit tests plus `test/demo-check.sh` on any OS:
+
+```bash
+make verify
+```
+
+```
+  ✓ privilege-escalation     1 alert(s)
+  ✓ sensitive-file-access    2 alert(s)
+  ✓ process-injection        1 alert(s)
+  ✓ reverse-shell            1 alert(s)
+  ✓ attack-chain             2 alert(s)
+  ✓ reverse shell confirms the socket fd
+  ✓ alert log is mode 0600
+  ✓ dashboard declines a non-terminal
+  ✓ pacing does not change the alerts
+  ✓ --pid excludes the unrelated cron job
+```
 
 ---
 
@@ -452,8 +708,20 @@ before we saw it is re-parented to init and lost.
 
 **Strings are truncated** — paths at 256 bytes, argv at 3 entries × 64 bytes.
 
-**No aggregation or rate limiting.** A process opening `/etc/shadow` in a loop
-produces one alert per open.
+### Storyline caveats
+
+**Session boundaries are `comm`-based.** A process that names itself `sshd`
+splits its own storyline in two. That costs correlation, not detection: every
+underlying alert still fires.
+
+**PIDs are reused.** Lineage and storylines are keyed by PID within the chain
+window. On a host that wraps its PID space inside ten minutes, an unrelated
+process could inherit a storyline. Exact fork/exit tracking (roadmap item 5)
+closes this.
+
+**Replay checks setuid bits on the replaying host.** The setuid-exec rule
+`stat`s the executed path; under `--replay` that is the local filesystem, not
+the captured one.
 
 ### Roadmap
 
@@ -462,8 +730,20 @@ produces one alert per open.
 3. Binary-identity verification to replace `comm` allowlisting
 4. Full capability diffing for `capset()`
 5. `sched_process_fork`/`exit` probes for exact process-tree tracking
-6. Alert deduplication and rate limiting
+6. ~~Alert deduplication and rate limiting~~ — done (`--dedup-window`)
 7. LSM hooks (`bpf_lsm`) for resolved-path matching
+
+---
+
+## Documentation
+
+| Document | What it covers |
+| -------- | -------------- |
+| [DEMO.md](DEMO.md) | Presentation script: pre-flight, five acts, what to point at, Q&A, failure fallbacks |
+| [REPORT.md](REPORT.md) | Project report: architecture diagrams, design decisions and their justification, results, metrics, limitations, roadmap |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes, Keep a Changelog format |
+| [test/README.md](test/README.md) | What each detection scenario does and how to run one |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
 
 ---
 
@@ -473,7 +753,8 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
 development workflow, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 Adding a detection rule is deliberately cheap: write one function in `detect/`,
-register it in `engine.go`, and add a table test. You should not need to touch
+register it in `engine.go`, add a table test, and map any new ATT&CK technique
+to its tactic in `storyline.go` (a test fails if you forget). You should not need to touch
 the eBPF code unless you need a syscall that is not yet probed.
 
 Security issues: see [SECURITY.md](SECURITY.md).
