@@ -1,0 +1,11 @@
+stateDiagram-v2
+    direction LR
+    [*] --> Idle
+    Idle --> Socket: socket()<br/>fd captured at sys_exit
+    Socket --> Connect: connect()<br/>destination recorded
+    Connect --> Dup: dup2/dup3 onto<br/>≥2 standard fds
+    Dup --> Alert: execve(shell)
+    Alert --> [*]: CRITICAL · T1059<br/>socket fd confirmed
+    Socket --> Idle: 2 s window elapsed
+    Connect --> Idle: 2 s window elapsed
+    Dup --> Idle: 2 s window elapsed

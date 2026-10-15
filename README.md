@@ -741,6 +741,9 @@ the captured one.
 | -------- | -------------- |
 | [DEMO.md](DEMO.md) | Presentation script: pre-flight, five acts, what to point at, Q&A, failure fallbacks |
 | [REPORT.md](REPORT.md) | Project report: architecture diagrams, design decisions and their justification, results, metrics, limitations, roadmap |
+| [docs/KrnlSentry_Project_Report_IEEE.docx](docs/KrnlSentry_Project_Report_IEEE.docx) | The same report as an IEEE conference-format Word document, for submission |
+| [docs/KrnlSentry_Project_Report_IEEE.pdf](docs/KrnlSentry_Project_Report_IEEE.pdf) | A rendered PDF of that document, for printing or emailing |
+| [docs/figures/](docs/figures/) | Rasterised report figures and their Mermaid sources |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes, Keep a Changelog format |
 | [test/README.md](test/README.md) | What each detection scenario does and how to run one |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |

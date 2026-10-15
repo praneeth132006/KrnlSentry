@@ -1,0 +1,12 @@
+flowchart LR
+    E["event"] --> OBS["record lineage<br/><i>every event</i>"]
+    OBS --> REC["update tracker<br/><i>before rules run</i>"]
+    REC --> R["evaluate rules"]
+    R --> C["correlate<br/><i>before dedup: a folded<br/>repeat is still evidence</i>"]
+    C --> D{"duplicate within<br/>dedup window?"}
+    D -->|no| A["emit alert"]
+    D -->|yes| F["fold → suppressed++"]
+    C --> T{"new tactic ≥<br/>threshold?"}
+    T -->|yes| CH["emit attack-chain"]
+    style C fill:#fff3e0,stroke:#e06c00
+    style CH fill:#fde8ef,stroke:#b3365e

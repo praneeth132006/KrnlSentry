@@ -1,0 +1,14 @@
+flowchart TB
+    SSHD["sshd[4090]<br/><i>session owner — walk stops here</i>"]
+    BASH["bash[4100]<br/><i>never alerts; known only<br/>from children's PPIDs</i>"]
+    CAT["cat[4120]<br/>TA0006 Credential Access"]
+    INJ["inject[4130]<br/>TA0005 Defense Evasion"]
+    EXP["exploit[4140]<br/>TA0004 Privilege Escalation"]
+    PY["python3[4150]<br/>TA0002 Execution + TA0011 C2"]
+    CHAIN["CRITICAL attack-chain<br/>5 tactics · 4 alerts · 18.0 s"]
+    SSHD --> BASH
+    BASH --> CAT & INJ & EXP & PY
+    CAT & INJ & EXP & PY -.-> CHAIN
+    style SSHD fill:#eceff1,stroke:#546e7a
+    style BASH fill:#fff7cc,stroke:#b38f00
+    style CHAIN fill:#fde8ef,stroke:#b3365e,stroke-width:2px

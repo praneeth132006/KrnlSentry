@@ -1,0 +1,17 @@
+flowchart LR
+    subgraph K["KERNEL SPACE"]
+        direction TB
+        TP["15 syscall<br/>tracepoints"] --> EXT["extract pid, uid, ppid,<br/>comm, args, timestamp<br/><i>no policy</i>"]
+        EXT --> SF["self-PID filter"]
+    end
+    RB[["ring buffer<br/>256 KiB<br/>globally ordered"]]
+    subgraph U["USER SPACE"]
+        direction TB
+        LD["ebpfloader<br/><i>only user of<br/>cilium/ebpf</i>"] --> EV["events<br/><i>decode, stdlib only</i>"]
+        EV --> DT["detect<br/>tracker → rules →<br/>correlator → dedup<br/><i>pure functions</i>"]
+        DT --> OUT["output<br/>JSONL · console ·<br/>dashboard"]
+    end
+    SF --> RB --> LD
+    style K fill:#fde8ef,stroke:#b3365e
+    style U fill:#e8f2fd,stroke:#1f5c99
+    style RB fill:#fff7cc,stroke:#b38f00
